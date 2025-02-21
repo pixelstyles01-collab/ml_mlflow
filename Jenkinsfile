@@ -9,7 +9,7 @@ pipeline {
     }
     
     options {
-        timeout(time: 30, unit: 'MINUTES')  // Reduced timeout since we're only running the MLflow server
+        timeout(time: 30, unit: 'MINUTES')  // Reduced timeout for running the MLflow server
         disableConcurrentBuilds()
     }
     
@@ -30,23 +30,43 @@ pipeline {
             }
         }
         
+        stage('Prepare MLflow Environment') {
+            steps {
+                sh '''
+                    # Create mlflow.db if it doesn't exist
+                    if [ ! -f ${MLFLOW_DB} ]; then
+                        touch ${MLFLOW_DB}
+                        echo "Created empty mlflow.db file"
+                    fi
+                    
+                    # Check if MLflow is installed in the image; if not, install it dynamically
+                    docker run --rm ${FINAL_IMAGE}:${DOCKER_TAG} pip show mlflow > /dev/null 2>&1 || {
+                        echo "MLflow not found in image. Installing MLflow dynamically..."
+                        docker run -d --name temp_mlflow_install ${FINAL_IMAGE}:${DOCKER_TAG} /bin/bash -c "pip install mlflow && touch /app/mlflow_installed"
+                        docker cp temp_mlflow_install:/app/mlflow_installed .
+                        docker rm -f temp_mlflow_install
+                    }
+                '''
+            }
+        }
+        
         stage('Start MLflow Server on Port 5001') {
             steps {
                 sh '''
                     # Remove any existing MLflow server container to avoid conflicts
                     docker rm -f mlflow_server || true
                     
-                    # Attempt to run the MLflow server from the final image, mapping port 5001 on host to 5000 in container
-                    # Note: This may fail if MLflow is not installed in the image or if mlflow.db is missing
+                    # Run the MLflow server from the final image, mapping port 5001 on host to 5000 in container
+                    # Use the image with MLflow (either pre-installed or dynamically added)
                     docker run -d --name mlflow_server -p 5001:5000 \
                     -v $(pwd)/${MLFLOW_DB}:/app/${MLFLOW_DB} \
                     ${FINAL_IMAGE}:${DOCKER_TAG} \
                     mlflow ui --backend-store-uri sqlite:///${MLFLOW_DB} --host 0.0.0.0 --port 5000 || {
-                        echo "Warning: MLflow server failed to start. Check if MLflow and mlflow.db are present in the image."
+                        echo "Warning: MLflow server failed to start. Check if MLflow and mlflow.db are configured correctly."
                         exit 1
                     }
                     
-                    echo "MLflow server started. Access it at http://localhost:5001 to view metrics and visualizations"
+                    echo "MLflow server started. Access it at http://localhost:5001 to view metrics and visualizations for the XGBoost model"
                 '''
             }
         }
@@ -100,7 +120,7 @@ pipeline {
         always {
             echo "Pipeline execution complete!"
             sh '''
-                docker rm -f mlflow_server || true
+                docker rm -f mlflow_server temp_mlflow_install || true
                 docker logout || true
                 docker system prune -f || true
             '''
